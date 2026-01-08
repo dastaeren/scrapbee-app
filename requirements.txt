@@ -1,0 +1,11 @@
+streamlit
+python-dotenv==1.0.1
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
+openpyxl==3.1.5
+pandas==2.2.2
+streamlit==1.37.1
+
+# Optional (only if you enable Selenium in settings)
+selenium==4.24.0
