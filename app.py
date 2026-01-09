@@ -1062,7 +1062,19 @@ with tab_extract:
     rows = st.session_state.extract_rows
     if rows:
         df_out = pd.DataFrame(rows)
-        st.dataframe(df_out, use_container_width=True)
+        st.data_editor(
+    df_out,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Video URL": st.column_config.LinkColumn(
+            "Video URL",
+            display_text="Open"
+        )
+    },
+    disabled=list(df_out.columns)  # read-only table
+)
+
 
         meta = {
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
