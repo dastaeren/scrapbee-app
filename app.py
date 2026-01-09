@@ -22,12 +22,6 @@ try:
 except Exception:
     pass
 
-st.info(
-    "To install this as an app: \n"
-    "• **Edge**: … → Apps → Install this site as an app \n"
-    "• **Chrome**: ⋮ → Create shortcut → ✅ Open as window"
-)
-
 # =========================
 # App Config
 # =========================
@@ -1131,4 +1125,5 @@ if not SERPER_API_KEY:
     st.warning("SERPER_API_KEY is missing. Web search will not work until you add it to secrets.toml or environment variables.")
 if not YOUTUBE_API_KEY:
     st.warning("YOUTUBE_API_KEY is missing. YouTube extraction will not work until you add it to secrets.toml or environment variables.")
+
 
