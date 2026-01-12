@@ -107,11 +107,6 @@ def init_state():
     st.session_state.setdefault("stop_flag", False)
     st.session_state.setdefault("zip_bytes", None)
 
-    # API extractor state
-    st.session_state.setdefault("api_rows", [])
-    st.session_state.setdefault("api_raw_preview", "")
-    st.session_state.setdefault("api_columns", [])
-
 init_state()
 
 def log(level: str, msg: str):
@@ -765,155 +760,6 @@ def default_filename(prefix: str, ext: str) -> str:
 
 
 # =========================
-# API Extractor helpers  (✅ ADDED)
-# =========================
-def _safe_json_loads(s: str):
-    s = (s or "").strip()
-    if not s:
-        return {}
-    return json.loads(s)
-
-def _get_by_dot_path(obj: Any, path: str) -> Any:
-    """
-    dot path like: result.resources
-    Supports list index via [0] e.g. result.resources[0].url
-    """
-    if not path:
-        return obj
-
-    cur = obj
-    tokens = [t for t in path.strip().split(".") if t.strip()]
-    for tok in tokens:
-        # handle [index]
-        m = re.match(r"^([^\[\]]+)\[(\d+)\]$", tok)
-        if m:
-            key = m.group(1)
-            idx = int(m.group(2))
-            if isinstance(cur, dict):
-                cur = cur.get(key, None)
-            else:
-                return None
-            if isinstance(cur, list) and 0 <= idx < len(cur):
-                cur = cur[idx]
-            else:
-                return None
-        else:
-            if isinstance(cur, dict):
-                cur = cur.get(tok, None)
-            else:
-                return None
-    return cur
-
-def api_fetch_to_rows(
-    url: str,
-    method: str,
-    headers_json: str,
-    params_json: str,
-    body_json: str,
-    timeout: int,
-    rows_path: str = ""  # ✅ IMPORTANT
-) -> tuple[list[dict], str]:
-    headers = {}
-    params = {}
-    body = None
-
-    try:
-        headers = _safe_json_loads(headers_json)
-        if headers and not isinstance(headers, dict):
-            raise ValueError("Headers JSON must be an object/dict.")
-    except Exception as e:
-        raise ValueError(f"Invalid Headers JSON: {e}")
-
-    try:
-        params = _safe_json_loads(params_json)
-        if params and not isinstance(params, dict):
-            raise ValueError("Query Params JSON must be an object/dict.")
-    except Exception as e:
-        raise ValueError(f"Invalid Query Params JSON: {e}")
-
-    if method.upper() in ("POST", "PUT", "PATCH"):
-        try:
-            body = _safe_json_loads(body_json)
-        except Exception as e:
-            raise ValueError(f"Invalid Body JSON: {e}")
-
-    headers = headers or {}
-    headers.setdefault("User-Agent", "ScrapBee/1.0")
-
-    m = method.upper()
-    if m == "GET":
-        r = requests.get(url, headers=headers, params=params, timeout=timeout)
-    elif m == "POST":
-        r = requests.post(url, headers=headers, params=params, json=body, timeout=timeout)
-    elif m == "PUT":
-        r = requests.put(url, headers=headers, params=params, json=body, timeout=timeout)
-    elif m == "PATCH":
-        r = requests.patch(url, headers=headers, params=params, json=body, timeout=timeout)
-    elif m == "DELETE":
-        r = requests.delete(url, headers=headers, params=params, timeout=timeout)
-    else:
-        raise ValueError("Unsupported method. Use GET/POST/PUT/PATCH/DELETE.")
-
-    r.raise_for_status()
-
-    raw_preview = (r.text or "")[:8000]
-    try:
-        data = r.json()
-    except Exception:
-        return [], raw_preview
-
-    # ✅ If user provides a path, extract rows from there
-    if rows_path.strip():
-        target = _get_by_dot_path(data, rows_path.strip())
-        if isinstance(target, list):
-            rows = [it if isinstance(it, dict) else {"value": it} for it in target]
-        elif isinstance(target, dict):
-            rows = [target]
-        elif target is None:
-            rows = []
-        else:
-            rows = [{"value": target}]
-    else:
-        # ✅ AUTO: try common list locations (including CKAN result.resources)
-        rows = []
-        if isinstance(data, list):
-            rows = [it if isinstance(it, dict) else {"value": it} for it in data]
-        elif isinstance(data, dict):
-            candidates = [
-                "result.resources", "result.items", "result.records",
-                "data", "results", "items", "records"
-            ]
-            for p in candidates:
-                v = _get_by_dot_path(data, p)
-                if isinstance(v, list):
-                    rows = [it if isinstance(it, dict) else {"value": it} for it in v]
-                    break
-            if not rows:
-                rows = [data]
-        else:
-            rows = [{"value": data}]
-
-    # Flatten nested dict keys into columns
-    try:
-        df = pd.json_normalize(rows, sep=".")
-        rows = df.to_dict(orient="records")
-    except Exception:
-        pass
-
-    return rows, raw_preview
-
-def infer_columns_from_rows(rows: list[dict]) -> list[str]:
-    if not rows:
-        return []
-    keys = set()
-    for r in rows[:50]:
-        if isinstance(r, dict):
-            for k in r.keys():
-                keys.add(k)
-    return sorted(keys)
-
-
-# =========================
 # Header
 # =========================
 st.markdown(
@@ -969,11 +815,6 @@ if st.sidebar.button("Reset"):
     st.session_state.files_df = pd.DataFrame()
     st.session_state.extract_rows = []
     st.session_state.zip_bytes = None
-
-    st.session_state.api_rows = []
-    st.session_state.api_raw_preview = ""
-    st.session_state.api_columns = []
-
     log("INFO", "Reset completed.")
 
 
@@ -991,7 +832,7 @@ with st.expander("History", expanded=False):
 # =========================
 # Tabs
 # =========================
-tab_search, tab_extract, tab_api = st.tabs(["Site Search", "Data Extractor", "API Extractor"])
+tab_search, tab_extract = st.tabs(["Site Search", "Data Extractor"])
 
 
 # =========================
@@ -999,10 +840,10 @@ tab_search, tab_extract, tab_api = st.tabs(["Site Search", "Data Extractor", "AP
 # =========================
 with tab_search:
     st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
-    st.markdown("### Step 1 — Search the web ")
+    st.markdown("### Step 1 — Search the web (More than 10 results ✅)")
     st.write("Enter a keyword → **Search Websites** → tick sites → **Crawl Selected Sites**.")
 
-    query = st.text_input("Search query", value="", placeholder="Search")
+    query = st.text_input("Search query", value="", placeholder="Example: NSB Bhutan statistics excel")
 
     colA, colB = st.columns([1, 1])
     with colA:
@@ -1288,181 +1129,6 @@ with tab_extract:
 
     else:
         st.info("No extracted data yet. Run an extraction to enable downloads.")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-# =========================
-# TAB 3: API Extractor (✅ FIXED so CKAN/NSB works)
-# =========================
-with tab_api:
-    st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
-    st.markdown("### API Extractor — Paste Any API + API Key + Extract Data")
-    st.write("Paste your API URL, add API key inside **Headers JSON**, choose the **Rows JSON path** (important for CKAN/NSB), then click **Fetch API Data**.")
-
-    api_url = st.text_input("API URL", value="", placeholder="https://api.example.com/v1/data")
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        api_method = st.selectbox("Method", ["GET", "POST", "PUT", "PATCH", "DELETE"], index=0)
-    with c2:
-        api_timeout = st.slider("Timeout (seconds)", 5, 120, int(settings.timeout_seconds), 5)
-    with c3:
-        rows_path = st.text_input(
-            "Rows JSON path (optional)",
-            value="result.resources",
-            placeholder="Example: result.resources (CKAN), results, data.items"
-        )
-
-    st.markdown("#### Headers JSON (Put your API key here)")
-    headers_json = st.text_area(
-        "Headers JSON",
-        value='{\n  "Authorization": "YOUR_API_KEY_HERE"\n}',
-        height=120
-    )
-
-    st.markdown("#### Query Params JSON (Optional)")
-    params_json = st.text_area(
-        "Query Params JSON",
-        value="{}",
-        height=90
-    )
-
-    st.markdown("#### Body JSON (Optional — for POST/PUT/PATCH)")
-    body_json = st.text_area(
-        "Body JSON",
-        value="{}",
-        height=120
-    )
-
-    fetch_api = st.button("Fetch API Data", use_container_width=True)
-
-    if fetch_api:
-        st.session_state.stop_flag = False
-        st.session_state.api_rows = []
-        st.session_state.api_raw_preview = ""
-        st.session_state.api_columns = []
-        if not api_url.strip():
-            st.warning("Please enter API URL.")
-        else:
-            try:
-                log("INFO", f"API fetch: {api_method} {api_url}")
-                rows, raw_preview = api_fetch_to_rows(
-                    url=api_url.strip(),
-                    method=api_method.strip(),
-                    headers_json=headers_json,
-                    params_json=params_json,
-                    body_json=body_json,
-                    timeout=int(api_timeout),
-                    rows_path=rows_path
-                )
-                st.session_state.api_rows = rows
-                st.session_state.api_raw_preview = raw_preview
-                st.session_state.api_columns = infer_columns_from_rows(rows)
-
-                if not rows:
-                    st.warning("No rows extracted. Try changing **Rows JSON path** (for CKAN use: result.resources).")
-                else:
-                    st.success(f"Extracted rows: {len(rows)}")
-
-            except Exception as e:
-                log("ERROR", f"API error: {e}")
-                st.error(str(e))
-
-    st.markdown("---")
-    st.markdown("### Preview")
-
-    api_rows = st.session_state.get("api_rows", [])
-    if api_rows:
-        df_api = pd.DataFrame(api_rows)
-
-        cols_default = st.session_state.get("api_columns", list(df_api.columns))
-        cols_text_api = st.text_area(
-            "Columns (one per line) — API Output",
-            value="\n".join(cols_default),
-            height=140
-        )
-        api_columns = [c.strip() for c in cols_text_api.splitlines() if c.strip()]
-        if api_columns:
-            for c in api_columns:
-                if c not in df_api.columns:
-                    df_api[c] = "N/A"
-            df_show = df_api[api_columns]
-        else:
-            df_show = df_api
-
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        st.markdown("### Download API Data")
-
-        meta_api = {
-            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "API URL": api_url,
-            "Method": api_method,
-            "Rows Path": rows_path,
-            "Rows": len(api_rows),
-        }
-
-        # Use your existing export format selector (col_export) from sidebar
-        fmt = col_export
-        if fmt == "xlsx":
-            data = export_xlsx_bytes(api_rows, api_columns, meta_api)
-            st.download_button(
-                "Download XLSX (API)",
-                data=data,
-                file_name=default_filename("ScrapBee_API", "xlsx"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-        elif fmt == "csv":
-            data = export_csv_bytes(api_rows, api_columns)
-            st.download_button(
-                "Download CSV (API)",
-                data=data,
-                file_name=default_filename("ScrapBee_API", "csv"),
-                mime="text/csv",
-                use_container_width=True
-            )
-        elif fmt == "json":
-            data = export_json_bytes(api_rows, api_columns)
-            st.download_button(
-                "Download JSON (API)",
-                data=data,
-                file_name=default_filename("ScrapBee_API", "json"),
-                mime="application/json",
-                use_container_width=True
-            )
-        elif fmt == "sqlite":
-            data = export_sqlite_bytes(api_rows, api_columns)
-            st.download_button(
-                "Download SQLite (API)",
-                data=data,
-                file_name=default_filename("ScrapBee_API", "db"),
-                mime="application/octet-stream",
-                use_container_width=True
-            )
-        else:
-            pdf = export_pdf_bytes(api_rows, api_columns, title=f"{APP_NAME} API Export")
-            if pdf is None:
-                st.warning("PDF export needs `reportlab`. Install it with: pip install reportlab")
-            else:
-                st.download_button(
-                    "Download PDF (API)",
-                    data=pdf,
-                    file_name=default_filename("ScrapBee_API", "pdf"),
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-
-    else:
-        st.info("No API data yet. Paste API and click **Fetch API Data**.")
-
-    st.markdown("### Raw API Preview")
-    raw_preview = st.session_state.get("api_raw_preview", "")
-    if raw_preview:
-        st.code(raw_preview, language="json")
-    else:
-        st.caption("Raw preview will appear here after fetch.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
