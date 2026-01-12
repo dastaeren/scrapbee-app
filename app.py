@@ -107,7 +107,7 @@ def init_state():
     st.session_state.setdefault("stop_flag", False)
     st.session_state.setdefault("zip_bytes", None)
 
-    # ✅ ADDED: allow API keys to be pasted in UI
+    # ✅ ADDED: store pasted keys in session_state
     st.session_state.setdefault("SERPER_API_KEY_UI", "")
     st.session_state.setdefault("YOUTUBE_API_KEY_UI", "")
 
@@ -147,6 +147,12 @@ def get_secret(name: str, default: str = "") -> str:
 
 SERPER_API_KEY = get_secret("SERPER_API_KEY", "")
 YOUTUBE_API_KEY = get_secret("YOUTUBE_API_KEY", "")
+
+# ✅ ADDED: if user pasted keys in UI, use them instead of secrets/env
+if st.session_state.get("SERPER_API_KEY_UI"):
+    SERPER_API_KEY = st.session_state["SERPER_API_KEY_UI"].strip()
+if st.session_state.get("YOUTUBE_API_KEY_UI"):
+    YOUTUBE_API_KEY = st.session_state["YOUTUBE_API_KEY_UI"].strip()
 
 
 # =========================
@@ -794,35 +800,6 @@ settings = Settings(
     max_head_checks_per_page=int(head_checks),
 )
 
-# ✅ ADDED: API key paste box (overrides env/secrets for this session)
-st.sidebar.markdown("---")
-with st.sidebar.expander("🔑 API Keys (Paste here)", expanded=False):
-    st.write("Paste keys here if you don't want to use secrets.toml/env. (Session only)")
-    serper_in = st.text_input(
-        "SERPER_API_KEY",
-        value=st.session_state.get("SERPER_API_KEY_UI", ""),
-        type="password",
-        placeholder="Paste SERPER API key"
-    )
-    youtube_in = st.text_input(
-        "YOUTUBE_API_KEY",
-        value=st.session_state.get("YOUTUBE_API_KEY_UI", ""),
-        type="password",
-        placeholder="Paste YouTube API key"
-    )
-
-    if st.button("Save Keys (this session)"):
-        st.session_state["SERPER_API_KEY_UI"] = serper_in.strip()
-        st.session_state["YOUTUBE_API_KEY_UI"] = youtube_in.strip()
-        st.success("Saved for this session. Now run Search/Extract.")
-
-# Override globals if user pasted keys
-if st.session_state.get("SERPER_API_KEY_UI", "").strip():
-    SERPER_API_KEY = st.session_state["SERPER_API_KEY_UI"].strip()
-if st.session_state.get("YOUTUBE_API_KEY_UI", "").strip():
-    YOUTUBE_API_KEY = st.session_state["YOUTUBE_API_KEY_UI"].strip()
-
-
 st.sidebar.markdown("---")
 st.sidebar.markdown("## Search settings")
 search_k = st.sidebar.slider("Number of search results", 1, 200, 30, 10)
@@ -865,7 +842,8 @@ with st.expander("History", expanded=False):
 # =========================
 # Tabs
 # =========================
-tab_search, tab_extract = st.tabs(["Site Search", "Data Extractor"])
+# ✅ ADDED: "API Keys" tab next to Data Extractor
+tab_search, tab_extract, tab_keys = st.tabs(["Site Search", "Data Extractor", "API Keys"])
 
 
 # =========================
@@ -1109,7 +1087,6 @@ with tab_extract:
     if rows:
         df_out = pd.DataFrame(rows)
 
-        # Show nice link column if present
         if "Video URL" in df_out.columns:
             st.data_editor(
                 df_out,
@@ -1124,7 +1101,7 @@ with tab_extract:
             st.dataframe(df_out, use_container_width=True)
 
         meta = {
-            "Date": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Platform": platform,
             "Columns": ", ".join(columns),
             "Rows": len(rows)
@@ -1167,9 +1144,67 @@ with tab_extract:
 
 
 # =========================
+# ✅ TAB 3: API Keys (NEW FEATURE)
+# =========================
+with tab_keys:
+    st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
+    st.markdown("### API Keys Setup")
+    st.write("Paste your API keys here. This is useful if you don’t want to use `secrets.toml`.")
+
+    serper_input = st.text_input(
+        "SERPER_API_KEY (for Site Search)",
+        value=st.session_state.get("SERPER_API_KEY_UI", ""),
+        type="password",
+        placeholder="Paste your Serper API key here"
+    )
+
+    yt_input = st.text_input(
+        "YOUTUBE_API_KEY (for YouTube Data Extractor)",
+        value=st.session_state.get("YOUTUBE_API_KEY_UI", ""),
+        type="password",
+        placeholder="Paste your YouTube API key here"
+    )
+
+    colk1, colk2 = st.columns([1, 1])
+    with colk1:
+        if st.button("Save / Apply Keys", use_container_width=True):
+            st.session_state["SERPER_API_KEY_UI"] = serper_input.strip()
+            st.session_state["YOUTUBE_API_KEY_UI"] = yt_input.strip()
+
+            # also set env so some hosts can reuse it
+            if serper_input.strip():
+                os.environ["SERPER_API_KEY"] = serper_input.strip()
+            if yt_input.strip():
+                os.environ["YOUTUBE_API_KEY"] = yt_input.strip()
+
+            log("OK", "API keys saved in session.")
+            st.success("Saved! Now go back to Site Search / Data Extractor and run again.")
+
+    with colk2:
+        if st.button("Clear Keys", use_container_width=True):
+            st.session_state["SERPER_API_KEY_UI"] = ""
+            st.session_state["YOUTUBE_API_KEY_UI"] = ""
+            try:
+                os.environ.pop("SERPER_API_KEY", None)
+                os.environ.pop("YOUTUBE_API_KEY", None)
+            except Exception:
+                pass
+            log("INFO", "API keys cleared from session.")
+            st.warning("Cleared. You will need to paste keys again.")
+
+    st.markdown("---")
+    st.markdown("### Current status")
+    st.write(f"Serper key loaded: **{bool(st.session_state.get('SERPER_API_KEY_UI') or SERPER_API_KEY)}**")
+    st.write(f"YouTube key loaded: **{bool(st.session_state.get('YOUTUBE_API_KEY_UI') or YOUTUBE_API_KEY)}**")
+
+    st.info("Note: Keys saved here are stored in your browser session. If you refresh or redeploy, you may need to paste again.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# =========================
 # Footer warnings (keys)
 # =========================
 if not SERPER_API_KEY:
-    st.warning("SERPER_API_KEY is missing. Web search will not work until you add it to secrets.toml or environment variables.")
+    st.warning("SERPER_API_KEY is missing. Web search will not work until you add it to secrets.toml / environment variables OR paste it in the API Keys tab.")
 if not YOUTUBE_API_KEY:
-    st.warning("YOUTUBE_API_KEY is missing. YouTube extraction will not work until you add it to secrets.toml or environment variables.")
+    st.warning("YOUTUBE_API_KEY is missing. YouTube extraction will not work until you add it to secrets.toml / environment variables OR paste it in the API Keys tab.")
