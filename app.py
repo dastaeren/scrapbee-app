@@ -107,6 +107,10 @@ def init_state():
     st.session_state.setdefault("stop_flag", False)
     st.session_state.setdefault("zip_bytes", None)
 
+    # ✅ ADDED: allow API keys to be pasted in UI
+    st.session_state.setdefault("SERPER_API_KEY_UI", "")
+    st.session_state.setdefault("YOUTUBE_API_KEY_UI", "")
+
 init_state()
 
 def log(level: str, msg: str):
@@ -143,19 +147,6 @@ def get_secret(name: str, default: str = "") -> str:
 
 SERPER_API_KEY = get_secret("SERPER_API_KEY", "")
 YOUTUBE_API_KEY = get_secret("YOUTUBE_API_KEY", "")
-
-# =========================
-# ✅ ADDED: Paste API keys directly in the app (no need secrets/env)
-# =========================
-with st.sidebar.expander("🔐 API Keys (paste here)", expanded=False):
-    _serper_in = st.text_input("SERPER_API_KEY", value=SERPER_API_KEY, type="password")
-    _yt_in = st.text_input("YOUTUBE_API_KEY", value=YOUTUBE_API_KEY, type="password")
-
-# Override globals if user pasted keys
-if _serper_in.strip():
-    SERPER_API_KEY = _serper_in.strip()
-if _yt_in.strip():
-    YOUTUBE_API_KEY = _yt_in.strip()
 
 
 # =========================
@@ -803,6 +794,35 @@ settings = Settings(
     max_head_checks_per_page=int(head_checks),
 )
 
+# ✅ ADDED: API key paste box (overrides env/secrets for this session)
+st.sidebar.markdown("---")
+with st.sidebar.expander("🔑 API Keys (Paste here)", expanded=False):
+    st.write("Paste keys here if you don't want to use secrets.toml/env. (Session only)")
+    serper_in = st.text_input(
+        "SERPER_API_KEY",
+        value=st.session_state.get("SERPER_API_KEY_UI", ""),
+        type="password",
+        placeholder="Paste SERPER API key"
+    )
+    youtube_in = st.text_input(
+        "YOUTUBE_API_KEY",
+        value=st.session_state.get("YOUTUBE_API_KEY_UI", ""),
+        type="password",
+        placeholder="Paste YouTube API key"
+    )
+
+    if st.button("Save Keys (this session)"):
+        st.session_state["SERPER_API_KEY_UI"] = serper_in.strip()
+        st.session_state["YOUTUBE_API_KEY_UI"] = youtube_in.strip()
+        st.success("Saved for this session. Now run Search/Extract.")
+
+# Override globals if user pasted keys
+if st.session_state.get("SERPER_API_KEY_UI", "").strip():
+    SERPER_API_KEY = st.session_state["SERPER_API_KEY_UI"].strip()
+if st.session_state.get("YOUTUBE_API_KEY_UI", "").strip():
+    YOUTUBE_API_KEY = st.session_state["YOUTUBE_API_KEY_UI"].strip()
+
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("## Search settings")
 search_k = st.sidebar.slider("Number of search results", 1, 200, 30, 10)
@@ -1104,7 +1124,7 @@ with tab_extract:
             st.dataframe(df_out, use_container_width=True)
 
         meta = {
-            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Date": datetime.now().strftime("%Y%m%d_%H%M%S"),
             "Platform": platform,
             "Columns": ", ".join(columns),
             "Rows": len(rows)
@@ -1138,8 +1158,7 @@ with tab_extract:
                 st.warning("PDF export needs `reportlab`. Install it with: pip install reportlab")
             else:
                 st.download_button("Download PDF", data=pdf, file_name=default_filename("ScrapBee_Data", "pdf"),
-                                   mime="application/pdf",
-                                   use_container_width=True)
+                                   mime="application/pdf", use_container_width=True)
 
     else:
         st.info("No extracted data yet. Run an extraction to enable downloads.")
