@@ -840,10 +840,10 @@ tab_search, tab_extract = st.tabs(["Site Search", "Data Extractor"])
 # =========================
 with tab_search:
     st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
-    st.markdown("### Step 1 — Search the web (More than 10 results ✅)")
+    st.markdown("### Step 1 — Search the web ")
     st.write("Enter a keyword → **Search Websites** → tick sites → **Crawl Selected Sites**.")
 
-    query = st.text_input("Search query", value="", placeholder="Example: NSB Bhutan statistics excel")
+    query = st.text_input("Search query", value="", placeholder="Search")
 
     colA, colB = st.columns([1, 1])
     with colA:
@@ -1140,3 +1140,4 @@ if not SERPER_API_KEY:
     st.warning("SERPER_API_KEY is missing. Web search will not work until you add it to secrets.toml or environment variables.")
 if not YOUTUBE_API_KEY:
     st.warning("YOUTUBE_API_KEY is missing. YouTube extraction will not work until you add it to secrets.toml or environment variables.")
+
