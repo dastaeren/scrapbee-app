@@ -107,9 +107,10 @@ def init_state():
     st.session_state.setdefault("stop_flag", False)
     st.session_state.setdefault("zip_bytes", None)
 
-    # ✅ ADDED: store pasted keys in session_state
-    st.session_state.setdefault("SERPER_API_KEY_UI", "")
-    st.session_state.setdefault("YOUTUBE_API_KEY_UI", "")
+    # API Extractor state (ADDED)
+    st.session_state.setdefault("api_rows", [])
+    st.session_state.setdefault("api_columns", [])
+    st.session_state.setdefault("api_raw_preview", "")
 
 init_state()
 
@@ -147,12 +148,6 @@ def get_secret(name: str, default: str = "") -> str:
 
 SERPER_API_KEY = get_secret("SERPER_API_KEY", "")
 YOUTUBE_API_KEY = get_secret("YOUTUBE_API_KEY", "")
-
-# ✅ ADDED: if user pasted keys in UI, use them instead of secrets/env
-if st.session_state.get("SERPER_API_KEY_UI"):
-    SERPER_API_KEY = st.session_state["SERPER_API_KEY_UI"].strip()
-if st.session_state.get("YOUTUBE_API_KEY_UI"):
-    YOUTUBE_API_KEY = st.session_state["YOUTUBE_API_KEY_UI"].strip()
 
 
 # =========================
@@ -770,6 +765,148 @@ def default_filename(prefix: str, ext: str) -> str:
 
 
 # =========================
+# API Extractor helpers (ADDED)
+# =========================
+def _safe_json_loads(text: str) -> dict:
+    text = (text or "").strip()
+    if not text:
+        return {}
+    return json.loads(text)
+
+def _get_by_dot_path(obj: Any, path: str) -> Any:
+    """
+    path example: data.items or results
+    Supports dict keys and list indexes: items[0]
+    """
+    if not path:
+        return obj
+    cur = obj
+    parts = path.split(".")
+    for p in parts:
+        if cur is None:
+            return None
+        m = re.match(r"^([^\[\]]+)(\[(\d+)\])?$", p)
+        if not m:
+            return None
+        key = m.group(1)
+        idx = m.group(3)
+
+        if isinstance(cur, dict):
+            cur = cur.get(key)
+        else:
+            return None
+
+        if idx is not None:
+            if isinstance(cur, list):
+                i = int(idx)
+                if i < 0 or i >= len(cur):
+                    return None
+                cur = cur[i]
+            else:
+                return None
+    return cur
+
+def api_fetch_to_rows(
+    url: str,
+    method: str,
+    headers_json: str,
+    params_json: str,
+    body_json: str,
+    timeout: int
+) -> tuple[list[dict], str]:
+    headers = {}
+    params = {}
+    body = None
+
+    try:
+        headers = _safe_json_loads(headers_json)
+        if headers and not isinstance(headers, dict):
+            raise ValueError("Headers JSON must be an object/dict.")
+    except Exception as e:
+        raise ValueError(f"Invalid Headers JSON: {e}")
+
+    try:
+        params = _safe_json_loads(params_json)
+        if params and not isinstance(params, dict):
+            raise ValueError("Query Params JSON must be an object/dict.")
+    except Exception as e:
+        raise ValueError(f"Invalid Query Params JSON: {e}")
+
+    if method.upper() in ("POST", "PUT", "PATCH"):
+        try:
+            body = _safe_json_loads(body_json)
+        except Exception as e:
+            raise ValueError(f"Invalid Body JSON: {e}")
+
+    # sensible defaults
+    headers = headers or {}
+    if "User-Agent" not in {k.title(): v for k, v in headers.items()} and "user-agent" not in {k.lower(): v for k, v in headers.items()}:
+        headers["User-Agent"] = "ScrapBee/1.0"
+
+    if method.upper() == "GET":
+        r = requests.get(url, headers=headers, params=params, timeout=timeout)
+    elif method.upper() == "POST":
+        r = requests.post(url, headers=headers, params=params, json=body, timeout=timeout)
+    elif method.upper() == "PUT":
+        r = requests.put(url, headers=headers, params=params, json=body, timeout=timeout)
+    elif method.upper() == "PATCH":
+        r = requests.patch(url, headers=headers, params=params, json=body, timeout=timeout)
+    elif method.upper() == "DELETE":
+        r = requests.delete(url, headers=headers, params=params, timeout=timeout)
+    else:
+        raise ValueError("Unsupported method. Use GET/POST/PUT/PATCH/DELETE.")
+
+    r.raise_for_status()
+
+    # raw preview (truncated)
+    raw = r.text
+    raw_preview = raw[:8000]
+
+    # parse JSON
+    try:
+        data = r.json()
+    except Exception:
+        # not JSON -> return empty table but show raw
+        return [], raw_preview
+
+    # Convert JSON to table rows
+    # - if list -> rows = list items
+    # - if dict -> try common keys, else one-row dict
+    rows: list[dict] = []
+    if isinstance(data, list):
+        for it in data:
+            if isinstance(it, dict):
+                rows.append(it)
+            else:
+                rows.append({"value": it})
+    elif isinstance(data, dict):
+        # common list containers
+        for k in ["data", "results", "items", "records"]:
+            v = data.get(k)
+            if isinstance(v, list):
+                for it in v:
+                    if isinstance(it, dict):
+                        rows.append(it)
+                    else:
+                        rows.append({k: it})
+                break
+        if not rows:
+            # keep dict as single row
+            rows = [data]
+    else:
+        rows = [{"value": data}]
+
+    # normalize nested dicts into columns
+    try:
+        df = pd.json_normalize(rows, sep=".")
+        rows = df.to_dict(orient="records")
+    except Exception:
+        pass
+
+    return rows, raw_preview
+
+
+# =========================
 # Header
 # =========================
 st.markdown(
@@ -825,6 +962,12 @@ if st.sidebar.button("Reset"):
     st.session_state.files_df = pd.DataFrame()
     st.session_state.extract_rows = []
     st.session_state.zip_bytes = None
+
+    # reset API tab (ADDED)
+    st.session_state.api_rows = []
+    st.session_state.api_columns = []
+    st.session_state.api_raw_preview = ""
+
     log("INFO", "Reset completed.")
 
 
@@ -842,8 +985,8 @@ with st.expander("History", expanded=False):
 # =========================
 # Tabs
 # =========================
-# ✅ ADDED: "API Keys" tab next to Data Extractor
-tab_search, tab_extract, tab_keys = st.tabs(["Site Search", "Data Extractor", "API Keys"])
+# NOTE: Only change here is adding a 3rd tab next to Data Extractor
+tab_search, tab_extract, tab_api = st.tabs(["Site Search", "Data Extractor", "API Extractor"])
 
 
 # =========================
@@ -1087,6 +1230,7 @@ with tab_extract:
     if rows:
         df_out = pd.DataFrame(rows)
 
+        # Show nice link column if present
         if "Video URL" in df_out.columns:
             st.data_editor(
                 df_out,
@@ -1144,60 +1288,181 @@ with tab_extract:
 
 
 # =========================
-# ✅ TAB 3: API Keys (NEW FEATURE)
+# TAB 3: API Extractor (ADDED)
 # =========================
-with tab_keys:
+with tab_api:
     st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
-    st.markdown("### API Keys Setup")
-    st.write("Paste your API keys here. This is useful if you don’t want to use `secrets.toml`.")
+    st.markdown("### API Extractor — Paste Any API + API Key + Extract Data")
 
-    serper_input = st.text_input(
-        "SERPER_API_KEY (for Site Search)",
-        value=st.session_state.get("SERPER_API_KEY_UI", ""),
-        type="password",
-        placeholder="Paste your Serper API key here"
+    st.write("Paste your API URL, add your API key inside **Headers JSON**, then click **Fetch API Data**.")
+
+    api_url = st.text_input("API URL", value="", placeholder="https://api.example.com/v1/data")
+
+    colm1, colm2 = st.columns([1, 1])
+    with colm1:
+        api_method = st.selectbox("Method", ["GET", "POST", "PUT", "PATCH", "DELETE"], index=0)
+    with colm2:
+        api_timeout = st.number_input("Timeout (seconds)", min_value=5, max_value=120, value=int(settings.timeout_seconds), step=1)
+
+    st.markdown("#### Headers JSON (Put your API key here)")
+    headers_json = st.text_area(
+        "Headers JSON",
+        height=120,
+        value='{\n  "Authorization": "Bearer YOUR_API_KEY"\n}',
+        help='Example: {"x-api-key":"KEY"} or {"Authorization":"Bearer KEY"}'
     )
 
-    yt_input = st.text_input(
-        "YOUTUBE_API_KEY (for YouTube Data Extractor)",
-        value=st.session_state.get("YOUTUBE_API_KEY_UI", ""),
-        type="password",
-        placeholder="Paste your YouTube API key here"
+    st.markdown("#### Query Params JSON (Optional)")
+    params_json = st.text_area(
+        "Query Params JSON",
+        height=90,
+        value='{}',
+        help='Example: {"limit": 100, "page": 1}'
     )
 
-    colk1, colk2 = st.columns([1, 1])
-    with colk1:
-        if st.button("Save / Apply Keys", use_container_width=True):
-            st.session_state["SERPER_API_KEY_UI"] = serper_input.strip()
-            st.session_state["YOUTUBE_API_KEY_UI"] = yt_input.strip()
-
-            # also set env so some hosts can reuse it
-            if serper_input.strip():
-                os.environ["SERPER_API_KEY"] = serper_input.strip()
-            if yt_input.strip():
-                os.environ["YOUTUBE_API_KEY"] = yt_input.strip()
-
-            log("OK", "API keys saved in session.")
-            st.success("Saved! Now go back to Site Search / Data Extractor and run again.")
-
-    with colk2:
-        if st.button("Clear Keys", use_container_width=True):
-            st.session_state["SERPER_API_KEY_UI"] = ""
-            st.session_state["YOUTUBE_API_KEY_UI"] = ""
-            try:
-                os.environ.pop("SERPER_API_KEY", None)
-                os.environ.pop("YOUTUBE_API_KEY", None)
-            except Exception:
-                pass
-            log("INFO", "API keys cleared from session.")
-            st.warning("Cleared. You will need to paste keys again.")
+    st.markdown("#### Body JSON (Optional — for POST/PUT/PATCH)")
+    body_json = st.text_area(
+        "Body JSON",
+        height=120,
+        value='{}'
+    )
 
     st.markdown("---")
-    st.markdown("### Current status")
-    st.write(f"Serper key loaded: **{bool(st.session_state.get('SERPER_API_KEY_UI') or SERPER_API_KEY)}**")
-    st.write(f"YouTube key loaded: **{bool(st.session_state.get('YOUTUBE_API_KEY_UI') or YOUTUBE_API_KEY)}**")
 
-    st.info("Note: Keys saved here are stored in your browser session. If you refresh or redeploy, you may need to paste again.")
+    fetch_api = st.button("Fetch API Data", use_container_width=True)
+
+    if fetch_api:
+        st.session_state.stop_flag = False
+        st.session_state.api_rows = []
+        st.session_state.api_columns = []
+        st.session_state.api_raw_preview = ""
+
+        if not api_url.strip():
+            st.warning("Please paste an API URL.")
+        else:
+            prog = st.progress(0, text="Calling API...")
+            try:
+                log("INFO", f"API call: {api_method} {api_url}")
+                rows, raw_preview = api_fetch_to_rows(
+                    url=api_url.strip(),
+                    method=api_method.strip(),
+                    headers_json=headers_json,
+                    params_json=params_json,
+                    body_json=body_json,
+                    timeout=int(api_timeout)
+                )
+                st.session_state.api_rows = rows
+                st.session_state.api_raw_preview = raw_preview
+
+                if not rows:
+                    st.warning("API returned no tabular rows (maybe not JSON list). Check Raw Preview below.")
+                    log("WARN", "API returned 0 table rows (or non-JSON).")
+                else:
+                    # choose columns automatically
+                    df_tmp = pd.DataFrame(rows)
+                    cols = list(df_tmp.columns)
+                    st.session_state.api_columns = cols
+                    st.success(f"API rows extracted: {len(rows)}")
+                    log("OK", f"API rows extracted: {len(rows)}")
+
+                prog.progress(100, text="Done.")
+            except Exception as e:
+                log("ERROR", f"API error: {e}")
+                st.error(str(e))
+            finally:
+                prog.empty()
+
+    # Preview
+    st.markdown("### Preview")
+    if st.session_state.api_rows:
+        df_api = pd.DataFrame(st.session_state.api_rows)
+
+        cols_text_api = st.text_area(
+            "Columns (one per line) — API Output",
+            value="\n".join(st.session_state.api_columns or list(df_api.columns)),
+            height=140,
+            help="Edit columns to keep only what you want in export."
+        )
+        api_columns = [c.strip() for c in cols_text_api.splitlines() if c.strip()]
+        st.session_state.api_columns = api_columns
+
+        # Ensure columns exist
+        for c in api_columns:
+            if c not in df_api.columns:
+                df_api[c] = "N/A"
+        df_api = df_api[api_columns] if api_columns else df_api
+
+        st.dataframe(df_api.head(500), use_container_width=True)
+
+        st.markdown("### Download API Data")
+        meta = {
+            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Source": "API Extractor",
+            "URL": api_url,
+            "Method": api_method,
+            "Rows": len(df_api)
+        }
+
+        fmt = col_export
+        rows_for_export = df_api.to_dict(orient="records")
+
+        if fmt == "xlsx":
+            data = export_xlsx_bytes(rows_for_export, api_columns, meta)
+            st.download_button(
+                "Download XLSX (API)",
+                data=data,
+                file_name=default_filename("ScrapBee_API_Data", "xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        elif fmt == "csv":
+            data = export_csv_bytes(rows_for_export, api_columns)
+            st.download_button(
+                "Download CSV (API)",
+                data=data,
+                file_name=default_filename("ScrapBee_API_Data", "csv"),
+                mime="text/csv",
+                use_container_width=True
+            )
+        elif fmt == "json":
+            data = export_json_bytes(rows_for_export, api_columns)
+            st.download_button(
+                "Download JSON (API)",
+                data=data,
+                file_name=default_filename("ScrapBee_API_Data", "json"),
+                mime="application/json",
+                use_container_width=True
+            )
+        elif fmt == "sqlite":
+            data = export_sqlite_bytes(rows_for_export, api_columns)
+            st.download_button(
+                "Download SQLite DB (API)",
+                data=data,
+                file_name=default_filename("ScrapBee_API_Data", "db"),
+                mime="application/octet-stream",
+                use_container_width=True
+            )
+        else:
+            pdf = export_pdf_bytes(rows_for_export, api_columns, title=f"{APP_NAME} API Export")
+            if pdf is None:
+                st.warning("PDF export needs `reportlab`. Install it with: pip install reportlab")
+            else:
+                st.download_button(
+                    "Download PDF (API)",
+                    data=pdf,
+                    file_name=default_filename("ScrapBee_API_Data", "pdf"),
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+    else:
+        st.info("No API data yet. Fetch API Data to preview and download.")
+
+    st.markdown("### Raw API Preview")
+    if st.session_state.api_raw_preview:
+        st.code(st.session_state.api_raw_preview, language="json")
+    else:
+        st.caption("Raw preview will appear here after you fetch.")
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1205,6 +1470,6 @@ with tab_keys:
 # Footer warnings (keys)
 # =========================
 if not SERPER_API_KEY:
-    st.warning("SERPER_API_KEY is missing. Web search will not work until you add it to secrets.toml / environment variables OR paste it in the API Keys tab.")
+    st.warning("SERPER_API_KEY is missing. Web search will not work until you add it to secrets.toml or environment variables.")
 if not YOUTUBE_API_KEY:
-    st.warning("YOUTUBE_API_KEY is missing. YouTube extraction will not work until you add it to secrets.toml / environment variables OR paste it in the API Keys tab.")
+    st.warning("YOUTUBE_API_KEY is missing. YouTube extraction will not work until you add it to secrets.toml or environment variables.")
