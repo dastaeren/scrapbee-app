@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse, urljoin, parse_qs, unquote
 
 import pandas as pd
@@ -31,6 +31,7 @@ APP_NAME = "ScrapBee"
 TAGLINE = "Web Data Extraction Platform"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
+
 # =========================
 # Styling
 # =========================
@@ -45,7 +46,7 @@ CUSTOM_CSS = """
     }
     html, body, [class*="css"]  { background: var(--sb-bg) !important; }
     .block-container { max-width: 1250px; padding-top: 1.2rem; padding-bottom: 2rem; }
-    .sb-header{
+    .sb-header {
         background: var(--sb-card);
         border: 1px solid var(--sb-border);
         border-radius: 16px;
@@ -54,9 +55,9 @@ CUSTOM_CSS = """
         box-shadow: 0 16px 35px rgba(0,0,0,0.10);
         margin-bottom: 14px;
     }
-    .sb-title{ font-size: 40px; font-weight: 800; color: #0B3D91; margin: 0; line-height: 1.1; }
-    .sb-tagline{ font-size: 15px; color: var(--sb-text); margin-top: 6px; opacity: 0.9; }
-    .sb-panel{
+    .sb-title { font-size: 40px; font-weight: 800; color: #0B3D91; margin: 0; line-height: 1.1; }
+    .sb-tagline { font-size: 15px; color: var(--sb-text); margin-top: 6px; opacity: 0.9; }
+    .sb-panel {
         background: var(--sb-card);
         border: 1px solid var(--sb-border);
         border-radius: 16px;
@@ -64,11 +65,11 @@ CUSTOM_CSS = """
         backdrop-filter: blur(8px);
         box-shadow: 0 16px 35px rgba(0,0,0,0.08);
     }
-    section[data-testid="stSidebar"]{
+    section[data-testid="stSidebar"] {
         background: rgba(255,255,255,0.35) !important;
         border-right: 1px solid var(--sb-border) !important;
     }
-    div.stButton > button, div.stDownloadButton > button{
+    div.stButton > button, div.stDownloadButton > button {
         border-radius: 10px !important;
         padding: 0.65rem 1rem !important;
         font-weight: 700 !important;
@@ -76,20 +77,19 @@ CUSTOM_CSS = """
         border: 1px solid rgba(255,255,255,0.55) !important;
         color: white !important;
     }
-    div.stButton > button:hover, div.stDownloadButton > button:hover{
+    div.stButton > button:hover, div.stDownloadButton > button:hover {
         filter: brightness(1.05);
         transform: translateY(-1px);
         transition: 180ms ease;
     }
     input[type="checkbox"]{ accent-color: var(--sb-accent) !important; }
-    .streamlit-expanderHeader{ font-weight: 700; }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # =========================
-# Session State + Logging
+# Helpers: state + logging
 # =========================
 def init_state():
     st.session_state.setdefault("history", [])
@@ -97,11 +97,15 @@ def init_state():
     st.session_state.setdefault("files_df", pd.DataFrame())
     st.session_state.setdefault("extract_rows", [])
     st.session_state.setdefault("extract_platform", "YouTube")
-    st.session_state.setdefault("extract_columns", [])
+    st.session_state.setdefault(
+        "extract_columns",
+        ["Video Title", "Upload Date", "View Count", "Duration", "Channel Name", "Video URL"]
+    )
     st.session_state.setdefault("stop_flag", False)
     st.session_state.setdefault("zip_bytes", None)
 
 init_state()
+
 
 def log(level: str, msg: str):
     st.session_state.history.append({
@@ -110,21 +114,18 @@ def log(level: str, msg: str):
         "msg": msg
     })
 
+
 def stop_requested() -> bool:
     return bool(st.session_state.get("stop_flag", False))
 
 
-# =========================
-# Settings
-# =========================
 @dataclass
 class Settings:
-    delay_seconds: float = 0.25
-    timeout_seconds: int = 15
+    delay_seconds: float = 0.2
+    timeout_seconds: int = 20
     max_pages_per_site: int = 10
-    user_agent: str = "ScrapBee/1.0 (+local)"
-    max_queue: int = 300
-    use_head_detect: bool = False  # optional: slower but finds file URLs without extensions
+    user_agent: str = "ScrapBee/1.0"
+    deep_detect_downloads: bool = True  # <-- IMPORTANT for NSB /download/ID/
 
 
 # =========================
@@ -144,26 +145,14 @@ YOUTUBE_API_KEY = get_secret("YOUTUBE_API_KEY", "")
 
 
 # =========================
-# Utility
+# URL helpers
 # =========================
 DEFAULT_FILE_EXTS = [
-    ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".csv", ".txt", ".rtf",
-    ".jpg", ".jpeg", ".png", ".gif",
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".csv", ".txt", ".rtf",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp",
     ".mp4", ".mp3", ".wav", ".avi",
     ".json", ".xml", ".zip", ".rar", ".7z"
 ]
-
-CONTENT_TYPE_TO_EXT = {
-    "application/pdf": ".pdf",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-    "application/vnd.ms-excel": ".xls",
-    "text/csv": ".csv",
-    "application/zip": ".zip",
-    "application/json": ".json",
-    "application/xml": ".xml",
-    "text/xml": ".xml",
-    "text/plain": ".txt",
-}
 
 def is_valid_url(u: str) -> bool:
     try:
@@ -172,59 +161,39 @@ def is_valid_url(u: str) -> bool:
     except Exception:
         return False
 
-def same_domain(a: str, b: str) -> bool:
-    try:
-        return urlparse(a).netloc == urlparse(b).netloc
-    except Exception:
-        return False
-
 def normalize_ext(url: str) -> str:
-    """
-    Try to infer extension from:
-    - path ending (.xlsx)
-    - query params (file=data.xlsx)
-    """
+    path = urlparse(url).path.lower()
+    for ext in DEFAULT_FILE_EXTS:
+        if path.endswith(ext):
+            return ext
+    return ""
+
+def looks_like_download_endpoint(url: str) -> bool:
+    """WordPress Download Monitor & similar endpoints: /download/<id>/ or ?dlm_download=..."""
+    u = urlparse(url)
+    path = (u.path or "").lower()
+    qs = parse_qs(u.query or "")
+    if "/download/" in path:
+        return True
+    if "dlm_download" in qs or "download_id" in qs:
+        return True
+    if "dlm_download_category" in qs:
+        return True
+    return False
+
+
+# =========================
+# HTTP session
+# =========================
+def get_session(settings: Settings) -> requests.Session:
+    s = requests.Session()
+    s.headers.update({"User-Agent": settings.user_agent})
+    return s
+
+
+def fetch_html(url: str, settings: Settings, session: requests.Session) -> Optional[str]:
     try:
-        u = urlparse(url)
-        path = (u.path or "").lower()
-
-        # direct path ext
-        for ext in DEFAULT_FILE_EXTS:
-            if path.endswith(ext):
-                return ext
-
-        # query params
-        qs = parse_qs(u.query)
-        for key, vals in qs.items():
-            for v in vals:
-                v = unquote(v).lower()
-                for ext in DEFAULT_FILE_EXTS:
-                    if v.endswith(ext):
-                        return ext
-
-        return ""
-    except Exception:
-        return ""
-
-def infer_ext_from_content_type(ct: str) -> str:
-    if not ct:
-        return ""
-    ct = ct.split(";")[0].strip().lower()
-    return CONTENT_TYPE_TO_EXT.get(ct, "")
-
-def safe_filename_from_url(u: str) -> str:
-    try:
-        name = os.path.basename(urlparse(u).path)
-        if name:
-            return name
-        return f"file_{int(time.time())}"
-    except Exception:
-        return f"file_{int(time.time())}"
-
-def fetch_html(url: str, settings: Settings) -> Optional[str]:
-    try:
-        headers = {"User-Agent": settings.user_agent}
-        r = requests.get(url, headers=headers, timeout=settings.timeout_seconds)
+        r = session.get(url, timeout=settings.timeout_seconds)
         if r.status_code >= 400:
             return None
         ct = (r.headers.get("content-type") or "").lower()
@@ -234,42 +203,128 @@ def fetch_html(url: str, settings: Settings) -> Optional[str]:
     except Exception:
         return None
 
-def head_detect_file(url: str, settings: Settings) -> str:
+
+def parse_content_disposition_filename(cd: str) -> Optional[str]:
     """
-    Optional: HEAD request to detect file type when URL has no extension.
-    Returns inferred extension or "".
+    Handles:
+      Content-Disposition: attachment; filename="file.xlsx"
+      Content-Disposition: attachment; filename*=UTF-8''file%20name.xlsx
+    """
+    if not cd:
+        return None
+
+    # filename*= form
+    m = re.search(r"filename\*\s*=\s*([^']*)''([^;]+)", cd, flags=re.IGNORECASE)
+    if m:
+        enc = m.group(1) or "utf-8"
+        fname = unquote(m.group(2))
+        return fname.strip().strip('"').strip("'")
+
+    # filename= form
+    m = re.search(r'filename\s*=\s*"([^"]+)"', cd, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    m = re.search(r"filename\s*=\s*([^;]+)", cd, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip().strip('"').strip("'")
+
+    return None
+
+
+def guess_extension_from_headers(url: str, headers: dict) -> Tuple[str, str]:
+    """
+    Returns (filename, ext). ext includes leading dot or "".
+    """
+    cd = headers.get("content-disposition", "") or headers.get("Content-Disposition", "") or ""
+    ct = (headers.get("content-type") or headers.get("Content-Type") or "").lower()
+
+    filename = parse_content_disposition_filename(cd) or ""
+    ext = ""
+
+    if filename:
+        ext = os.path.splitext(filename.lower())[1]
+        if ext in DEFAULT_FILE_EXTS:
+            return filename, ext
+
+    # fallback on content-type
+    ct_map = {
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.ms-excel": ".xls",
+        "text/csv": ".csv",
+        "application/zip": ".zip",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    }
+    for k, v in ct_map.items():
+        if k in ct:
+            return (filename or ""), v
+
+    # last fallback: url path ext
+    ext2 = normalize_ext(url)
+    return (filename or ""), ext2
+
+
+def probe_file(url: str, settings: Settings, session: requests.Session) -> Optional[Dict[str, str]]:
+    """
+    HEAD first (fast). If blocked, GET with stream.
+    Returns: {"filename": "...", "ext": ".xlsx", "final_url": "..."} or None
     """
     try:
-        headers = {"User-Agent": settings.user_agent}
-        r = requests.head(url, headers=headers, timeout=settings.timeout_seconds, allow_redirects=True)
-        ct = r.headers.get("content-type") or ""
-        return infer_ext_from_content_type(ct)
+        r = session.head(url, allow_redirects=True, timeout=settings.timeout_seconds)
+        if r.status_code < 400:
+            filename, ext = guess_extension_from_headers(r.url, r.headers)
+            if ext:
+                return {"filename": filename or os.path.basename(urlparse(r.url).path) or r.url,
+                        "ext": ext,
+                        "final_url": r.url}
     except Exception:
-        return ""
+        pass
+
+    # fallback GET (some servers don't allow HEAD)
+    try:
+        r = session.get(url, allow_redirects=True, stream=True, timeout=settings.timeout_seconds)
+        if r.status_code >= 400:
+            return None
+        filename, ext = guess_extension_from_headers(r.url, r.headers)
+        if ext:
+            return {"filename": filename or os.path.basename(urlparse(r.url).path) or r.url,
+                    "ext": ext,
+                    "final_url": r.url}
+    except Exception:
+        return None
+
+    return None
 
 
 # =========================
-# Serper: Website search (FIXES "only 10")
+# Serper Search (FIX: >10 results)
 # =========================
-def serper_search_websites(query: str, num_results: int, timeout: int) -> pd.DataFrame:
+def serper_search(query: str, num_results: int, timeout: int) -> pd.DataFrame:
     """
-    Returns up to num_results website results by paginating Serper with 'page'.
+    FIX: paginate Serper so slider > 10 actually returns more.
     """
     if not SERPER_API_KEY:
-        raise RuntimeError("SERPER_API_KEY is missing. Add it to secrets.toml or env.")
+        raise RuntimeError("SERPER_API_KEY is missing. Add it to .streamlit/secrets.toml or environment variables.")
 
     url = "https://google.serper.dev/search"
     headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
 
-    target = min(max(int(num_results), 1), 100)
-    rows = []
-    page = 1
+    target = max(1, min(int(num_results), 200))  # keep reasonable for UI
+    rows: List[Dict[str, Any]] = []
 
-    while len(rows) < target and page <= 10:
-        payload = {"q": query, "num": min(10, target - len(rows)), "page": page}
+    page = 1
+    while len(rows) < target:
+        if stop_requested():
+            break
+
+        batch = min(100, target - len(rows))
+        payload = {"q": query, "num": batch, "page": page}
         r = requests.post(url, headers=headers, json=payload, timeout=timeout)
         r.raise_for_status()
         data = r.json()
+
         organic = data.get("organic", []) or []
         if not organic:
             break
@@ -281,79 +336,34 @@ def serper_search_websites(query: str, num_results: int, timeout: int) -> pd.Dat
                 "URL": item.get("link", ""),
                 "Snippet": item.get("snippet", "")
             })
+            if len(rows) >= target:
+                break
 
         page += 1
 
+        # small pause to be polite
+        time.sleep(0.1)
+
     df = pd.DataFrame(rows).drop_duplicates(subset=["URL"]).reset_index(drop=True)
+    if not df.empty:
+        df["Title"] = df["Title"].fillna("")
+        df["URL"] = df["URL"].fillna("")
+        df["Snippet"] = df["Snippet"].fillna("")
     return df
 
 
 # =========================
-# Serper: FAST file search for a domain (BEST for NSB)
+# Crawl + discover files (FIX: NSB Excel)
 # =========================
-def serper_find_files(domain_or_site_url: str, exts: List[str], max_results: int, timeout: int) -> pd.DataFrame:
-    if not SERPER_API_KEY:
-        raise RuntimeError("SERPER_API_KEY is missing.")
-
-    s = domain_or_site_url.strip()
-    if s.startswith("http"):
-        dom = urlparse(s).netloc
-    else:
-        dom = s.replace("https://", "").replace("http://", "").split("/")[0]
-
-    ftypes = []
-    for e in exts:
-        e = e.lower().strip().lstrip(".")
-        if e:
-            ftypes.append(f"filetype:{e}")
-    if not ftypes:
-        ftypes = ["filetype:xlsx", "filetype:xls", "filetype:csv", "filetype:zip", "filetype:pdf"]
-
-    q = f"site:{dom} ({' OR '.join(ftypes)})"
-
-    url = "https://google.serper.dev/search"
-    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
-
-    target = min(max(int(max_results), 1), 100)
-    rows = []
-    page = 1
-
-    while len(rows) < target and page <= 10:
-        payload = {"q": q, "num": min(10, target - len(rows)), "page": page}
-        r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        r.raise_for_status()
-        data = r.json()
-        organic = data.get("organic", []) or []
-        if not organic:
-            break
-
-        for item in organic:
-            link = (item.get("link") or "").strip()
-            title = (item.get("title") or "").strip()
-            if not link:
-                continue
-
-            ext = normalize_ext(link) or "unknown"
-            rows.append({
-                "Select": False,
-                "File": os.path.basename(urlparse(link).path) or title or link,
-                "Type": ext,
-                "URL": link,
-                "Source": dom
-            })
-
-        page += 1
-
-    df = pd.DataFrame(rows).drop_duplicates(subset=["URL"]).reset_index(drop=True)
-    return df
-
-
-# =========================
-# Crawl + discover files (improved)
-# =========================
-def discover_files_from_sites(sites: List[str], exts: List[str], settings: Settings) -> pd.DataFrame:
+def discover_files_from_sites(
+    sites: List[str],
+    exts: List[str],
+    settings: Settings,
+    session: requests.Session
+) -> pd.DataFrame:
     exts = [e.lower().strip() for e in exts]
     found: List[Dict[str, Any]] = []
+    probe_cache: Dict[str, Optional[Dict[str, str]]] = {}
 
     for site in sites:
         if stop_requested():
@@ -364,12 +374,14 @@ def discover_files_from_sites(sites: List[str], exts: List[str], settings: Setti
             log("WARN", f"Skipping invalid site URL: {site}")
             continue
 
-        log("INFO", f"Crawling: {site}")
+        log("INFO", f"Crawling site: {site}")
         visited = set()
         queue = [site]
         pages_crawled = 0
 
-        while queue and pages_crawled < settings.max_pages_per_site and len(queue) < settings.max_queue:
+        root_netloc = urlparse(site).netloc
+
+        while queue and pages_crawled < settings.max_pages_per_site:
             if stop_requested():
                 log("WARN", "Stopped by user.")
                 break
@@ -379,16 +391,15 @@ def discover_files_from_sites(sites: List[str], exts: List[str], settings: Setti
                 continue
             visited.add(cur)
 
-            html = fetch_html(cur, settings)
+            html = fetch_html(cur, settings, session=session)
             pages_crawled += 1
-            if settings.delay_seconds > 0:
+            if settings.delay_seconds:
                 time.sleep(settings.delay_seconds)
 
             if not html:
                 continue
 
             soup = BeautifulSoup(html, "html.parser")
-
             for a in soup.select("a[href]"):
                 href = (a.get("href") or "").strip()
                 if not href:
@@ -398,32 +409,47 @@ def discover_files_from_sites(sites: List[str], exts: List[str], settings: Setti
                 if not is_valid_url(abs_url):
                     continue
 
-                # file by extension or query params
+                # 1) direct extension in URL
                 ext = normalize_ext(abs_url)
 
-                # optional: detect by content-type if no ext
-                if (not ext) and settings.use_head_detect:
-                    ext = head_detect_file(abs_url, settings)
+                # 2) if no ext BUT looks like download endpoint, probe headers (NSB fix)
+                if not ext and settings.deep_detect_downloads and looks_like_download_endpoint(abs_url):
+                    if abs_url not in probe_cache:
+                        probe_cache[abs_url] = probe_file(abs_url, settings=settings, session=session)
+                    probed = probe_cache.get(abs_url)
+                    if probed:
+                        ext = probed["ext"]
+                        # use final_url for actual download
+                        abs_url = probed["final_url"]
+                        fname = probed["filename"]
+                    else:
+                        fname = ""
+                else:
+                    fname = ""
 
                 if ext and (not exts or ext in exts):
                     found.append({
                         "Select": False,
-                        "File": safe_filename_from_url(abs_url),
+                        "File": fname or os.path.basename(urlparse(abs_url).path) or abs_url,
                         "Type": ext,
                         "URL": abs_url,
                         "Source": site
                     })
-                else:
-                    # keep crawling only within same domain
-                    if same_domain(abs_url, site) and abs_url not in visited and abs_url not in queue:
-                        queue.append(abs_url)
+                    continue
+
+                # crawl deeper only inside same domain
+                try:
+                    if urlparse(abs_url).netloc == root_netloc:
+                        if abs_url not in visited and abs_url not in queue:
+                            queue.append(abs_url)
+                except Exception:
+                    pass
 
         log("OK", f"Finished crawling {site}. Pages crawled: {pages_crawled}")
 
     df = pd.DataFrame(found)
     if df.empty:
         return df
-
     df = df.drop_duplicates(subset=["URL"]).reset_index(drop=True)
     return df
 
@@ -431,33 +457,39 @@ def discover_files_from_sites(sites: List[str], exts: List[str], settings: Setti
 # =========================
 # Download selected files as ZIP
 # =========================
-def download_files_as_zip(urls: List[str], settings: Settings) -> bytes:
+def download_files_as_zip(urls: List[str], settings: Settings, session: requests.Session) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for u in urls:
             if stop_requested():
                 break
             try:
-                headers = {"User-Agent": settings.user_agent}
-                r = requests.get(u, headers=headers, timeout=settings.timeout_seconds)
+                r = session.get(u, timeout=settings.timeout_seconds)
                 r.raise_for_status()
-                name = safe_filename_from_url(u)
 
+                # Try filename from headers
+                cd = r.headers.get("content-disposition", "") or r.headers.get("Content-Disposition", "")
+                fname = parse_content_disposition_filename(cd) if cd else None
+                name = fname or os.path.basename(urlparse(u).path) or f"file_{int(time.time())}"
+
+                # avoid duplicates
                 if name in zf.namelist():
                     base, ext = os.path.splitext(name)
                     name = f"{base}_{int(time.time())}{ext}"
 
                 zf.writestr(name, r.content)
-                if settings.delay_seconds > 0:
+
+                if settings.delay_seconds:
                     time.sleep(settings.delay_seconds)
             except Exception:
                 continue
+
     buf.seek(0)
     return buf.read()
 
 
 # =========================
-# Export helpers
+# Exporters
 # =========================
 def export_csv_bytes(rows: List[Dict[str, Any]], columns: List[str]) -> bytes:
     df = pd.DataFrame(rows)
@@ -488,7 +520,6 @@ def export_xlsx_bytes(rows: List[Dict[str, Any]], columns: List[str], meta: Dict
         df.to_excel(writer, index=False, sheet_name="Data")
         meta_df = pd.DataFrame([{"Key": k, "Value": str(v)} for k, v in meta.items()])
         meta_df.to_excel(writer, index=False, sheet_name="Metadata")
-
     out.seek(0)
     return out.read()
 
@@ -505,7 +536,6 @@ def export_sqlite_bytes(rows: List[Dict[str, Any]], columns: List[str]) -> bytes
 
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
-
     con2 = sqlite3.connect(path)
     con.backup(con2)
     con2.close()
@@ -513,12 +543,10 @@ def export_sqlite_bytes(rows: List[Dict[str, Any]], columns: List[str]) -> bytes
 
     with open(path, "rb") as f:
         data = f.read()
-
     try:
         os.remove(path)
     except Exception:
         pass
-
     return data
 
 def default_filename(prefix: str, ext: str) -> str:
@@ -539,37 +567,43 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
 # =========================
 # Sidebar Controls
 # =========================
 st.sidebar.markdown("## Controls")
-
-delay = st.sidebar.slider("Request delay (seconds)", 0.0, 2.0, 0.25, 0.05)
-max_pages = st.sidebar.slider("Max pages per site (crawl)", 1, 80, 12, 1)
-timeout = st.sidebar.slider("Timeout (seconds)", 5, 60, 15, 1)
-use_head = st.sidebar.checkbox("Use HEAD detect (slower, finds hidden file types)", value=False)
+delay = st.sidebar.slider("Request delay (seconds)", 0.0, 3.0, 0.2, 0.05)
+max_pages = st.sidebar.slider("Max pages per site (crawl)", 1, 50, 10, 1)
+timeout = st.sidebar.slider("Timeout (seconds)", 5, 60, 20, 1)
+deep_detect = st.sidebar.checkbox("Deep-detect download links (needed for NSB Excel)", value=True)
 
 settings = Settings(
     delay_seconds=float(delay),
     timeout_seconds=int(timeout),
     max_pages_per_site=int(max_pages),
-    use_head_detect=bool(use_head)
+    deep_detect_downloads=bool(deep_detect),
 )
+
+session = get_session(settings)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## Search settings")
-search_k = st.sidebar.slider("Number of search results", 10, 100, 30, 10)
+search_k = st.sidebar.slider("Number of search results", 1, 200, 30, 10)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## File types")
 exts = st.sidebar.multiselect(
     "Extensions to find",
     DEFAULT_FILE_EXTS,
-    default=[".pdf", ".xlsx", ".xls", ".csv", ".zip", ".docx", ".pptx"]
+    default=[".pdf", ".xlsx", ".xls", ".csv", ".docx", ".pptx"]
 )
 
 st.sidebar.markdown("---")
-col_export = st.sidebar.selectbox("Export format (data)", ["xlsx", "csv", "json", "sqlite"], index=0)
+col_export = st.sidebar.selectbox(
+    "Export format (data)",
+    ["xlsx", "csv", "json", "sqlite"],
+    index=0
+)
 
 st.sidebar.markdown("---")
 if st.sidebar.button("Stop"):
@@ -583,12 +617,14 @@ if st.sidebar.button("Reset"):
     st.session_state.zip_bytes = None
     log("INFO", "Reset completed.")
 
+
 # =========================
 # History
 # =========================
 with st.expander("History", expanded=False):
     if st.session_state.history:
-        st.dataframe(pd.DataFrame(st.session_state.history), use_container_width=True, hide_index=True)
+        hdf = pd.DataFrame(st.session_state.history)
+        st.dataframe(hdf, use_container_width=True, hide_index=True)
     else:
         st.info("No history yet.")
 
@@ -596,49 +632,52 @@ with st.expander("History", expanded=False):
 # =========================
 # Tabs
 # =========================
-tab_search = st.tabs(["Site Search & File Finder"])[0]
+tab_search, tab_extract = st.tabs(["Site Search", "Data Extractor"])
 
+
+# =========================
+# TAB 1: Search & Download
+# =========================
 with tab_search:
     st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
 
-    st.markdown("### Step 1 — Find websites OR find files directly (FAST)")
-    st.write(
-        "✅ **Best for NSB / JS-heavy websites:** Use **Find Files via Google (FAST)**.\n\n"
-        "Crawl works only if the page HTML contains the file links (not loaded by JavaScript)."
+    st.markdown("### Option A — Paste URLs directly (recommended for NSB)")
+    manual_urls = st.text_area(
+        "Manual site/page URLs (one per line)",
+        placeholder="Example:\nhttps://www.nsb.gov.bt/?dlm_download_category=ialc-excel",
+        height=80
     )
 
-    query = st.text_input("Search query OR domain", value="", placeholder="Example: nsb.gov.bt OR Bhutan agriculture report")
+    st.markdown("---")
+    st.markdown("### Option B — Search the web (Serper)")
+    query = st.text_input("Search query", value="", placeholder="Example: NSB Bhutan IALC excel download")
 
-    colA, colB, colC = st.columns([1, 1, 1])
+    colA, colB = st.columns([1, 1])
     with colA:
         do_search = st.button("Search Websites", use_container_width=True)
     with colB:
-        do_fast_files = st.button("Find Files via Google (FAST)", use_container_width=True)
-    with colC:
-        do_crawl = st.button("Crawl Selected Sites (HTML Crawl)", use_container_width=True)
+        do_crawl = st.button("Crawl Selected/Manual Sites (Find Files)", use_container_width=True)
 
-    # Website search
+    # Search
     if do_search:
         st.session_state.stop_flag = False
         if not query.strip():
             st.warning("Please enter a search query.")
         else:
             try:
-                log("INFO", f"Searching websites: {query} (results={search_k})")
-                df = serper_search_websites(query.strip(), num_results=int(search_k), timeout=settings.timeout_seconds)
+                log("INFO", f"Searching web: {query} (results={search_k})")
+                df = serper_search(query.strip(), num_results=int(search_k), timeout=settings.timeout_seconds)
+                st.info(f"Search results returned: {len(df)}")
                 st.session_state.search_df = df
-                st.info(f"Website results returned: {len(df)}")
-                if df.empty:
-                    st.warning("No results found.")
-                else:
-                    log("OK", f"Website results: {len(df)}")
             except Exception as e:
                 log("ERROR", str(e))
                 st.error(str(e))
 
-    # Show website results
+    selected_sites = []
+
+    # show search results
     if not st.session_state.search_df.empty:
-        st.markdown("### Website search results (tick Select)")
+        st.markdown("### Search results (tick Select to choose sites)")
         sdf = st.session_state.search_df.copy()
         edited = st.data_editor(
             sdf,
@@ -651,71 +690,49 @@ with tab_search:
             disabled=["Title", "URL", "Snippet"]
         )
         st.session_state.search_df = edited
-
         selected_sites = edited.loc[edited["Select"] == True, "URL"].dropna().tolist()
-        st.write(f"Selected websites: **{len(selected_sites)}**")
-    else:
-        selected_sites = []
+        st.write(f"Selected from search: **{len(selected_sites)}**")
 
-    # FAST file finder (best)
-    if do_fast_files:
-        st.session_state.stop_flag = False
+    # add manual urls
+    manual_list = [u.strip() for u in manual_urls.splitlines() if u.strip()]
+    manual_list = [u for u in manual_list if is_valid_url(u)]
 
-        # If user selected websites, use those. Otherwise use query as domain.
-        targets = selected_sites if selected_sites else ([query.strip()] if query.strip() else [])
-        if not targets:
-            st.warning("Select a website OR type a domain like: nsb.gov.bt")
-        else:
-            all_files = []
-            prog = st.progress(0, text="Finding files via Google (FAST)...")
-            try:
-                for i, t in enumerate(targets, start=1):
-                    if stop_requested():
-                        break
-                    log("INFO", f"FAST file search: {t}")
-                    df_files = serper_find_files(t, exts, max_results=int(search_k), timeout=settings.timeout_seconds)
-                    all_files.append(df_files)
-                    prog.progress(int((i / max(1, len(targets))) * 100), text=f"Processed {i}/{len(targets)}")
-                prog.progress(100, text="Done.")
-            finally:
-                prog.empty()
+    if manual_list:
+        st.write(f"Manual URLs: **{len(manual_list)}**")
 
-            if all_files:
-                out = pd.concat(all_files, ignore_index=True).drop_duplicates(subset=["URL"]).reset_index(drop=True)
-                st.session_state.files_df = out
-                if out.empty:
-                    st.warning("No files found. Try adding .zip/.csv/.xlsx and increase search results.")
-                else:
-                    st.success(f"Found {len(out)} files (FAST mode).")
+    combined_sites = list(dict.fromkeys(selected_sites + manual_list))
+    st.write(f"Total sites/pages to crawl: **{len(combined_sites)}**")
 
-    # HTML crawl (slower + may fail for JS pages)
+    # Crawl
     if do_crawl:
         st.session_state.stop_flag = False
-        if not selected_sites:
-            st.warning("Select at least one website (tick Select) from website results first.")
+        if not combined_sites:
+            st.warning("Add at least one manual URL or select a website from search.")
         else:
-            prog = st.progress(0, text="Crawling selected sites (HTML)...")
+            prog = st.progress(0, text="Crawling...")
             try:
-                log("INFO", f"Crawling {len(selected_sites)} sites (HTML crawl)...")
-                df_files = discover_files_from_sites(selected_sites, exts, settings=settings)
+                log("INFO", f"Crawling {len(combined_sites)} sites/pages...")
+                df_files = discover_files_from_sites(combined_sites, exts, settings=settings, session=session)
                 st.session_state.files_df = df_files
-                prog.progress(100, text="Crawl completed.")
                 if df_files.empty:
-                    st.warning("No files found by HTML crawl. For NSB, use FAST mode.")
+                    log("WARN", "No files found.")
+                    st.warning("No matching files found. Try enabling deep-detect and include .xlsx/.xls/.csv in extensions.")
                 else:
-                    st.success(f"Found {len(df_files)} files by crawl.")
+                    log("OK", f"Files found: {len(df_files)}")
+                    st.success(f"Found {len(df_files)} files.")
+                prog.progress(100, text="Done.")
             except Exception as e:
                 log("ERROR", str(e))
                 st.error(str(e))
             finally:
                 prog.empty()
 
-    # Show found files
+    # Files + ZIP
     if not st.session_state.files_df.empty:
         st.markdown("---")
-        st.markdown("### Step 2 — Select files to download")
-
+        st.markdown("### Select files to download")
         fdf = st.session_state.files_df.copy()
+
         fedited = st.data_editor(
             fdf,
             use_container_width=True,
@@ -727,12 +744,11 @@ with tab_search:
             disabled=["File", "Type", "URL", "Source"]
         )
         st.session_state.files_df = fedited
+
         selected_files = fedited.loc[fedited["Select"] == True, "URL"].dropna().tolist()
         st.write(f"Selected files: **{len(selected_files)}**")
 
-        st.markdown("### Step 3 — Download ZIP")
         col1, col2 = st.columns([1, 1])
-
         with col1:
             if st.button("Prepare ZIP (Selected Files)", use_container_width=True):
                 st.session_state.stop_flag = False
@@ -740,13 +756,12 @@ with tab_search:
                     st.warning("Select at least one file.")
                 else:
                     prog = st.progress(0, text="Preparing ZIP...")
-                    try:
-                        log("INFO", f"Zipping {len(selected_files)} files...")
-                        st.session_state.zip_bytes = download_files_as_zip(selected_files, settings=settings)
-                        prog.progress(100, text="ZIP ready.")
-                        st.success("ZIP ready.")
-                    finally:
-                        prog.empty()
+                    log("INFO", f"Preparing ZIP for {len(selected_files)} files...")
+                    zip_bytes = download_files_as_zip(selected_files, settings=settings, session=session)
+                    st.session_state.zip_bytes = zip_bytes
+                    prog.progress(100, text="ZIP ready.")
+                    st.success("ZIP is ready.")
+                    prog.empty()
 
         with col2:
             if st.session_state.zip_bytes:
@@ -758,11 +773,21 @@ with tab_search:
                     use_container_width=True
                 )
 
-    else:
-        st.info("No files yet. Tip: For NSB, use **Find Files via Google (FAST)**.")
-
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+# =========================
+# TAB 2: Data Extractor (kept simple placeholder)
+# =========================
+with tab_extract:
+    st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
+    st.info("Your YouTube extractor section can be pasted back here unchanged if you want. "
+            "This answer focused on fixing NSB Excel crawling + search results.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 # Footer warnings
 if not SERPER_API_KEY:
-    st.warning("SERPER_API_KEY is missing. Web search / FAST file search won't work until you set it.")
+    st.warning("SERPER_API_KEY is missing. Web search will not work until you add it to secrets.toml or env vars.")
+if not YOUTUBE_API_KEY:
+    st.info("YOUTUBE_API_KEY missing (only needed if you add the YouTube extractor back).")
