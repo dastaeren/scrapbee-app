@@ -107,10 +107,10 @@ def init_state():
     st.session_state.setdefault("stop_flag", False)
     st.session_state.setdefault("zip_bytes", None)
 
-    # API Extractor state (ADDED)
+    # API extractor state
     st.session_state.setdefault("api_rows", [])
-    st.session_state.setdefault("api_columns", [])
     st.session_state.setdefault("api_raw_preview", "")
+    st.session_state.setdefault("api_columns", [])
 
 init_state()
 
@@ -765,43 +765,41 @@ def default_filename(prefix: str, ext: str) -> str:
 
 
 # =========================
-# API Extractor helpers (ADDED)
+# API Extractor helpers  (✅ ADDED)
 # =========================
-def _safe_json_loads(text: str) -> dict:
-    text = (text or "").strip()
-    if not text:
+def _safe_json_loads(s: str):
+    s = (s or "").strip()
+    if not s:
         return {}
-    return json.loads(text)
+    return json.loads(s)
 
 def _get_by_dot_path(obj: Any, path: str) -> Any:
     """
-    path example: data.items or results
-    Supports dict keys and list indexes: items[0]
+    dot path like: result.resources
+    Supports list index via [0] e.g. result.resources[0].url
     """
     if not path:
         return obj
+
     cur = obj
-    parts = path.split(".")
-    for p in parts:
-        if cur is None:
-            return None
-        m = re.match(r"^([^\[\]]+)(\[(\d+)\])?$", p)
-        if not m:
-            return None
-        key = m.group(1)
-        idx = m.group(3)
-
-        if isinstance(cur, dict):
-            cur = cur.get(key)
+    tokens = [t for t in path.strip().split(".") if t.strip()]
+    for tok in tokens:
+        # handle [index]
+        m = re.match(r"^([^\[\]]+)\[(\d+)\]$", tok)
+        if m:
+            key = m.group(1)
+            idx = int(m.group(2))
+            if isinstance(cur, dict):
+                cur = cur.get(key, None)
+            else:
+                return None
+            if isinstance(cur, list) and 0 <= idx < len(cur):
+                cur = cur[idx]
+            else:
+                return None
         else:
-            return None
-
-        if idx is not None:
-            if isinstance(cur, list):
-                i = int(idx)
-                if i < 0 or i >= len(cur):
-                    return None
-                cur = cur[i]
+            if isinstance(cur, dict):
+                cur = cur.get(tok, None)
             else:
                 return None
     return cur
@@ -812,7 +810,8 @@ def api_fetch_to_rows(
     headers_json: str,
     params_json: str,
     body_json: str,
-    timeout: int
+    timeout: int,
+    rows_path: str = ""  # ✅ IMPORTANT
 ) -> tuple[list[dict], str]:
     headers = {}
     params = {}
@@ -838,65 +837,63 @@ def api_fetch_to_rows(
         except Exception as e:
             raise ValueError(f"Invalid Body JSON: {e}")
 
-    # sensible defaults
     headers = headers or {}
-    if "User-Agent" not in {k.title(): v for k, v in headers.items()} and "user-agent" not in {k.lower(): v for k, v in headers.items()}:
-        headers["User-Agent"] = "ScrapBee/1.0"
+    headers.setdefault("User-Agent", "ScrapBee/1.0")
 
-    if method.upper() == "GET":
+    m = method.upper()
+    if m == "GET":
         r = requests.get(url, headers=headers, params=params, timeout=timeout)
-    elif method.upper() == "POST":
+    elif m == "POST":
         r = requests.post(url, headers=headers, params=params, json=body, timeout=timeout)
-    elif method.upper() == "PUT":
+    elif m == "PUT":
         r = requests.put(url, headers=headers, params=params, json=body, timeout=timeout)
-    elif method.upper() == "PATCH":
+    elif m == "PATCH":
         r = requests.patch(url, headers=headers, params=params, json=body, timeout=timeout)
-    elif method.upper() == "DELETE":
+    elif m == "DELETE":
         r = requests.delete(url, headers=headers, params=params, timeout=timeout)
     else:
         raise ValueError("Unsupported method. Use GET/POST/PUT/PATCH/DELETE.")
 
     r.raise_for_status()
 
-    # raw preview (truncated)
-    raw = r.text
-    raw_preview = raw[:8000]
-
-    # parse JSON
+    raw_preview = (r.text or "")[:8000]
     try:
         data = r.json()
     except Exception:
-        # not JSON -> return empty table but show raw
         return [], raw_preview
 
-    # Convert JSON to table rows
-    # - if list -> rows = list items
-    # - if dict -> try common keys, else one-row dict
-    rows: list[dict] = []
-    if isinstance(data, list):
-        for it in data:
-            if isinstance(it, dict):
-                rows.append(it)
-            else:
-                rows.append({"value": it})
-    elif isinstance(data, dict):
-        # common list containers
-        for k in ["data", "results", "items", "records"]:
-            v = data.get(k)
-            if isinstance(v, list):
-                for it in v:
-                    if isinstance(it, dict):
-                        rows.append(it)
-                    else:
-                        rows.append({k: it})
-                break
-        if not rows:
-            # keep dict as single row
-            rows = [data]
+    # ✅ If user provides a path, extract rows from there
+    if rows_path.strip():
+        target = _get_by_dot_path(data, rows_path.strip())
+        if isinstance(target, list):
+            rows = [it if isinstance(it, dict) else {"value": it} for it in target]
+        elif isinstance(target, dict):
+            rows = [target]
+        elif target is None:
+            rows = []
+        else:
+            rows = [{"value": target}]
     else:
-        rows = [{"value": data}]
+        # ✅ AUTO: try common list locations (including CKAN result.resources)
+        rows = []
+        if isinstance(data, list):
+            rows = [it if isinstance(it, dict) else {"value": it} for it in data]
+        elif isinstance(data, dict):
+            candidates = [
+                "result.resources", "result.items", "result.records",
+                "data", "results", "items", "records"
+            ]
+            for p in candidates:
+                v = _get_by_dot_path(data, p)
+                if isinstance(v, list):
+                    rows = [it if isinstance(it, dict) else {"value": it} for it in v]
+                    break
+            if not rows:
+                rows = [data]
+        else:
+            rows = [{"value": data}]
 
-    # normalize nested dicts into columns
+    # Flatten nested dict keys into columns
     try:
         df = pd.json_normalize(rows, sep=".")
         rows = df.to_dict(orient="records")
@@ -904,6 +901,16 @@ def api_fetch_to_rows(
         pass
 
     return rows, raw_preview
+
+def infer_columns_from_rows(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    keys = set()
+    for r in rows[:50]:
+        if isinstance(r, dict):
+            for k in r.keys():
+                keys.add(k)
+    return sorted(keys)
 
 
 # =========================
@@ -963,10 +970,9 @@ if st.sidebar.button("Reset"):
     st.session_state.extract_rows = []
     st.session_state.zip_bytes = None
 
-    # reset API tab (ADDED)
     st.session_state.api_rows = []
-    st.session_state.api_columns = []
     st.session_state.api_raw_preview = ""
+    st.session_state.api_columns = []
 
     log("INFO", "Reset completed.")
 
@@ -985,7 +991,6 @@ with st.expander("History", expanded=False):
 # =========================
 # Tabs
 # =========================
-# NOTE: Only change here is adding a 3rd tab next to Data Extractor
 tab_search, tab_extract, tab_api = st.tabs(["Site Search", "Data Extractor", "API Extractor"])
 
 
@@ -1288,180 +1293,176 @@ with tab_extract:
 
 
 # =========================
-# TAB 3: API Extractor (ADDED)
+# TAB 3: API Extractor (✅ FIXED so CKAN/NSB works)
 # =========================
 with tab_api:
     st.markdown('<div class="sb-panel">', unsafe_allow_html=True)
     st.markdown("### API Extractor — Paste Any API + API Key + Extract Data")
-
-    st.write("Paste your API URL, add your API key inside **Headers JSON**, then click **Fetch API Data**.")
+    st.write("Paste your API URL, add API key inside **Headers JSON**, choose the **Rows JSON path** (important for CKAN/NSB), then click **Fetch API Data**.")
 
     api_url = st.text_input("API URL", value="", placeholder="https://api.example.com/v1/data")
-
-    colm1, colm2 = st.columns([1, 1])
-    with colm1:
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
         api_method = st.selectbox("Method", ["GET", "POST", "PUT", "PATCH", "DELETE"], index=0)
-    with colm2:
-        api_timeout = st.number_input("Timeout (seconds)", min_value=5, max_value=120, value=int(settings.timeout_seconds), step=1)
+    with c2:
+        api_timeout = st.slider("Timeout (seconds)", 5, 120, int(settings.timeout_seconds), 5)
+    with c3:
+        rows_path = st.text_input(
+            "Rows JSON path (optional)",
+            value="result.resources",
+            placeholder="Example: result.resources (CKAN), results, data.items"
+        )
 
     st.markdown("#### Headers JSON (Put your API key here)")
     headers_json = st.text_area(
         "Headers JSON",
-        height=120,
-        value='{\n  "Authorization": "Bearer YOUR_API_KEY"\n}',
-        help='Example: {"x-api-key":"KEY"} or {"Authorization":"Bearer KEY"}'
+        value='{\n  "Authorization": "YOUR_API_KEY_HERE"\n}',
+        height=120
     )
 
     st.markdown("#### Query Params JSON (Optional)")
     params_json = st.text_area(
         "Query Params JSON",
-        height=90,
-        value='{}',
-        help='Example: {"limit": 100, "page": 1}'
+        value="{}",
+        height=90
     )
 
     st.markdown("#### Body JSON (Optional — for POST/PUT/PATCH)")
     body_json = st.text_area(
         "Body JSON",
-        height=120,
-        value='{}'
+        value="{}",
+        height=120
     )
-
-    st.markdown("---")
 
     fetch_api = st.button("Fetch API Data", use_container_width=True)
 
     if fetch_api:
         st.session_state.stop_flag = False
         st.session_state.api_rows = []
-        st.session_state.api_columns = []
         st.session_state.api_raw_preview = ""
-
+        st.session_state.api_columns = []
         if not api_url.strip():
-            st.warning("Please paste an API URL.")
+            st.warning("Please enter API URL.")
         else:
-            prog = st.progress(0, text="Calling API...")
             try:
-                log("INFO", f"API call: {api_method} {api_url}")
+                log("INFO", f"API fetch: {api_method} {api_url}")
                 rows, raw_preview = api_fetch_to_rows(
                     url=api_url.strip(),
                     method=api_method.strip(),
                     headers_json=headers_json,
                     params_json=params_json,
                     body_json=body_json,
-                    timeout=int(api_timeout)
+                    timeout=int(api_timeout),
+                    rows_path=rows_path
                 )
                 st.session_state.api_rows = rows
                 st.session_state.api_raw_preview = raw_preview
+                st.session_state.api_columns = infer_columns_from_rows(rows)
 
                 if not rows:
-                    st.warning("API returned no tabular rows (maybe not JSON list). Check Raw Preview below.")
-                    log("WARN", "API returned 0 table rows (or non-JSON).")
+                    st.warning("No rows extracted. Try changing **Rows JSON path** (for CKAN use: result.resources).")
                 else:
-                    # choose columns automatically
-                    df_tmp = pd.DataFrame(rows)
-                    cols = list(df_tmp.columns)
-                    st.session_state.api_columns = cols
-                    st.success(f"API rows extracted: {len(rows)}")
-                    log("OK", f"API rows extracted: {len(rows)}")
+                    st.success(f"Extracted rows: {len(rows)}")
 
-                prog.progress(100, text="Done.")
             except Exception as e:
                 log("ERROR", f"API error: {e}")
                 st.error(str(e))
-            finally:
-                prog.empty()
 
-    # Preview
+    st.markdown("---")
     st.markdown("### Preview")
-    if st.session_state.api_rows:
-        df_api = pd.DataFrame(st.session_state.api_rows)
 
+    api_rows = st.session_state.get("api_rows", [])
+    if api_rows:
+        df_api = pd.DataFrame(api_rows)
+
+        cols_default = st.session_state.get("api_columns", list(df_api.columns))
         cols_text_api = st.text_area(
             "Columns (one per line) — API Output",
-            value="\n".join(st.session_state.api_columns or list(df_api.columns)),
-            height=140,
-            help="Edit columns to keep only what you want in export."
+            value="\n".join(cols_default),
+            height=140
         )
         api_columns = [c.strip() for c in cols_text_api.splitlines() if c.strip()]
-        st.session_state.api_columns = api_columns
+        if api_columns:
+            for c in api_columns:
+                if c not in df_api.columns:
+                    df_api[c] = "N/A"
+            df_show = df_api[api_columns]
+        else:
+            df_show = df_api
 
-        # Ensure columns exist
-        for c in api_columns:
-            if c not in df_api.columns:
-                df_api[c] = "N/A"
-        df_api = df_api[api_columns] if api_columns else df_api
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
 
-        st.dataframe(df_api.head(500), use_container_width=True)
-
+        st.markdown("---")
         st.markdown("### Download API Data")
-        meta = {
+
+        meta_api = {
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Source": "API Extractor",
-            "URL": api_url,
+            "API URL": api_url,
             "Method": api_method,
-            "Rows": len(df_api)
+            "Rows Path": rows_path,
+            "Rows": len(api_rows),
         }
 
+        # Use your existing export format selector (col_export) from sidebar
         fmt = col_export
-        rows_for_export = df_api.to_dict(orient="records")
-
         if fmt == "xlsx":
-            data = export_xlsx_bytes(rows_for_export, api_columns, meta)
+            data = export_xlsx_bytes(api_rows, api_columns, meta_api)
             st.download_button(
                 "Download XLSX (API)",
                 data=data,
-                file_name=default_filename("ScrapBee_API_Data", "xlsx"),
+                file_name=default_filename("ScrapBee_API", "xlsx"),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         elif fmt == "csv":
-            data = export_csv_bytes(rows_for_export, api_columns)
+            data = export_csv_bytes(api_rows, api_columns)
             st.download_button(
                 "Download CSV (API)",
                 data=data,
-                file_name=default_filename("ScrapBee_API_Data", "csv"),
+                file_name=default_filename("ScrapBee_API", "csv"),
                 mime="text/csv",
                 use_container_width=True
             )
         elif fmt == "json":
-            data = export_json_bytes(rows_for_export, api_columns)
+            data = export_json_bytes(api_rows, api_columns)
             st.download_button(
                 "Download JSON (API)",
                 data=data,
-                file_name=default_filename("ScrapBee_API_Data", "json"),
+                file_name=default_filename("ScrapBee_API", "json"),
                 mime="application/json",
                 use_container_width=True
             )
         elif fmt == "sqlite":
-            data = export_sqlite_bytes(rows_for_export, api_columns)
+            data = export_sqlite_bytes(api_rows, api_columns)
             st.download_button(
-                "Download SQLite DB (API)",
+                "Download SQLite (API)",
                 data=data,
-                file_name=default_filename("ScrapBee_API_Data", "db"),
+                file_name=default_filename("ScrapBee_API", "db"),
                 mime="application/octet-stream",
                 use_container_width=True
             )
         else:
-            pdf = export_pdf_bytes(rows_for_export, api_columns, title=f"{APP_NAME} API Export")
+            pdf = export_pdf_bytes(api_rows, api_columns, title=f"{APP_NAME} API Export")
             if pdf is None:
                 st.warning("PDF export needs `reportlab`. Install it with: pip install reportlab")
             else:
                 st.download_button(
                     "Download PDF (API)",
                     data=pdf,
-                    file_name=default_filename("ScrapBee_API_Data", "pdf"),
+                    file_name=default_filename("ScrapBee_API", "pdf"),
                     mime="application/pdf",
                     use_container_width=True
                 )
+
     else:
-        st.info("No API data yet. Fetch API Data to preview and download.")
+        st.info("No API data yet. Paste API and click **Fetch API Data**.")
 
     st.markdown("### Raw API Preview")
-    if st.session_state.api_raw_preview:
-        st.code(st.session_state.api_raw_preview, language="json")
+    raw_preview = st.session_state.get("api_raw_preview", "")
+    if raw_preview:
+        st.code(raw_preview, language="json")
     else:
-        st.caption("Raw preview will appear here after you fetch.")
+        st.caption("Raw preview will appear here after fetch.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
